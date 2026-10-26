@@ -11,6 +11,8 @@
 #include <netinet/in.h>
 #include <netinet/ip.h>
 
+#include "http.h"
+
 #define MAX_CONNECTIONS 64
 
 typedef struct {
@@ -26,26 +28,6 @@ typedef struct {
   // TODO: Move it to the heap
   Connection connections[MAX_CONNECTIONS];
 } HttpServer;
-
-bool has_2crlf(const char* data, int len) {
-  int ix = 3;
-  while (ix < len) {
-    switch (data[ix]) {
-      case '\n':
-        if (memcmp(&data[ix-3], "\r\n\r\n", 4) == 0)
-          return true;
-        ix += 2;
-        break;
-      case '\r':
-        ix += 1;
-        break;
-      default:
-        ix += 4;
-        break;
-    }
-  }
-  return false;
-}
 
 int HttpServer_init(HttpServer* s, int sockfd) {
   // TODO: Take in the address to listen to instead
@@ -132,11 +114,23 @@ int HttpServer_next_connection(HttpServer* s, Connection* new_connection) {
           }
         } else {
           c->rp += nread;
-          printf("(client %d) read '%.*s'\n", c->fd, c->rp, c->buffer);
 
           if (has_2crlf(c->buffer, c->rp)) {
+            HttpRequest request = {};
+            int parsed = HttpRequest_parse(c->buffer, c->rp, &request);
+            if (parsed == 0) {
+              printf("HTTP method: %.*s\n", request.method.len, c->buffer + request.method.off);
+              printf("HTTP url: %.*s\n", request.url.len, c->buffer + request.url.off);
+              printf("HTTP version: %.*s\n", request.version.len, c->buffer + request.version.off);
+              for (int h = 0; h < request.num_headers; h++) {
+                printf("  %.*s: %.*s\n",
+                    request.headers[h].key.len, c->buffer + request.headers[h].key.off,
+                    request.headers[h].value.len, c->buffer + request.headers[h].value.off);
+              }
+              return 0;
+            }
+            // TODO: Close if parsing fails
             // TODO: Here check if it's a valid http request
-            return 0;
           }
         }
       }
