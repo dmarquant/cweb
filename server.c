@@ -25,6 +25,8 @@ typedef struct {
   int sock;
   int epollfd;
 
+  bool accepting_stopped;
+
   // TODO: Move it to the heap
   Connection connections[MAX_CONNECTIONS];
 } HttpServer;
@@ -48,14 +50,28 @@ int HttpServer_init(HttpServer* s, int sockfd) {
   }
 
   memset(s, 0, sizeof(*s));
+  s->accepting_stopped = false;
   s->sock = sockfd;
   s->epollfd = epollfd;
   return 0;
 }
 
-int HttpServer_next_connection(HttpServer* s, Connection* new_connection) {
-  bool accepting_stopped = false;
+int HttpServer_close_connection(HttpServer* s, Connection* c) {
+  epoll_ctl(s->epollfd, EPOLL_CTL_DEL, c->fd, 0);
+  close(c->fd);
+  memset(c, 0, sizeof(Connection));
 
+  if (s->accepting_stopped) {
+    s->accepting_stopped = false;
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.fd = -1;
+    epoll_ctl(s->epollfd, EPOLL_CTL_ADD, s->sock, &ev);
+  }
+}
+
+// TODO: Return type should be different. It should contain the open connection, the current read buffer and the parsed http request.
+int HttpServer_next_connection(HttpServer* s, Connection* new_connection) {
   struct epoll_event events[MAX_CONNECTIONS+1];
 
   while (true) {
@@ -77,13 +93,14 @@ int HttpServer_next_connection(HttpServer* s, Connection* new_connection) {
         }
         if (!connection) {
           printf("(server) no free connection. cannot accept\n");
-          accepting_stopped = true;
+          s->accepting_stopped = true;
           epoll_ctl(s->epollfd, EPOLL_CTL_DEL, s->sock, 0);
           continue;
         }
 
         struct sockaddr incoming;
         socklen_t incoming_len;
+        // TODO: Loop if EINTR
         int client = accept(s->sock, &incoming, &incoming_len);
         if (client > 0) {
           printf("(server) New connection: %d!\n", client);
@@ -97,46 +114,35 @@ int HttpServer_next_connection(HttpServer* s, Connection* new_connection) {
         }
       } else {
         assert(events[e].data.fd < MAX_CONNECTIONS);
-        Connection* c = &s->connections[events[e].data.fd];
+        int cix = events[e].data.fd;
+        Connection* c = &s->connections[cix];
 
+        // TODO: Loop if EINTR
         int nread = read(c->fd, c->buffer + c->rp, sizeof(c->buffer) - c->rp);
-        if (nread == 0) {
-          printf("(client %d) no more data\n", c->fd);
-          epoll_ctl(s->epollfd, EPOLL_CTL_DEL, c->fd, 0);
-          close(c->fd);
-          memset(c, 0, sizeof(Connection));
-          if (accepting_stopped) {
-            accepting_stopped = false;
-            struct epoll_event ev;
-            ev.events = EPOLLIN;
-            ev.data.fd = -1;
-            epoll_ctl(s->epollfd, EPOLL_CTL_ADD, s->sock, &ev);
-          }
+        if (nread <= 0) {
+          HttpServer_close_connection(s, c);
         } else {
           c->rp += nread;
 
-          if (has_2crlf(c->buffer, c->rp)) {
-            HttpRequest request = {};
-            int parsed = HttpRequest_parse(c->buffer, c->rp, &request);
-            if (parsed == 0) {
-              printf("HTTP method: %.*s\n", request.method.len, c->buffer + request.method.off);
-              printf("HTTP url: %.*s\n", request.url.len, c->buffer + request.url.off);
-              printf("HTTP version: %.*s\n", request.version.len, c->buffer + request.version.off);
-              for (int h = 0; h < request.num_headers; h++) {
-                printf("  %.*s: %.*s\n",
-                    request.headers[h].key.len, c->buffer + request.headers[h].key.off,
-                    request.headers[h].value.len, c->buffer + request.headers[h].value.off);
-              }
-              return 0;
+          HttpRequest request = {};
+          int parsed = HttpRequest_parse(c->buffer, c->rp, &request);
+          if (parsed == 0) {
+            printf("HTTP method: %.*s\n", request.method.len, c->buffer + request.method.off);
+            printf("HTTP url: %.*s\n", request.url.len, c->buffer + request.url.off);
+            printf("HTTP version: %.*s\n", request.version.len, c->buffer + request.version.off);
+            for (int h = 0; h < request.num_headers; h++) {
+              printf("  %.*s: %.*s\n",
+                  request.headers[h].key.len, c->buffer + request.headers[h].key.off,
+                  request.headers[h].value.len, c->buffer + request.headers[h].value.off);
             }
-            // TODO: Close if parsing fails
-            // TODO: Here check if it's a valid http request
+            return 0;
+          } else {
+            HttpServer_close_connection(s, c);
           }
         }
       }
     }
   }
-
 }
 
 int main(int argc, char** argv) {

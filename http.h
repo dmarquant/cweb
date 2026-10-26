@@ -53,7 +53,13 @@ bool has_2crlf(const char* data, int len) {
 }
 
 int HttpRequest_parse(const char* buffer, int len, HttpRequest* request) {
-  assert(has_2crlf(buffer, len));
+  // Minimal valid request: 'GET / HTTP/1.1\r\n\r\n' (18 bytes)
+  if (len < 18) {
+    return -1;
+  }
+  if (!has_2crlf(buffer, len)) {
+    return -1;
+  }
 
   int ix = 0;
   HttpRequest result = {};
@@ -160,6 +166,8 @@ int HttpRequest_parse(const char* buffer, int len, HttpRequest* request) {
     result.num_headers++;
   }
   ix += 2;
+
+  result.content_start = ix;
   
   *request = result;
   return 0;
